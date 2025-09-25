@@ -31,7 +31,7 @@ jobs:
           ./mvnw -B -DskipTests spring-boot:build-image
 
       - name: Configure AWS credentials (assume role via OIDC)
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@main
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           role-session-name: github-actions
