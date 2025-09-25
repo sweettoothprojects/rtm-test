@@ -1,5 +1,9 @@
 name: CI
 
+permissions:
+  id-token: write
+  contents: read
+
 on:
   push:
     branches: [ main ]
@@ -25,3 +29,54 @@ jobs:
       - name: Build image with Buildpacks (paketo)
         run: |
           ./mvnw -B -DskipTests spring-boot:build-image
+
+      - name: Configure AWS credentials (assume role via OIDC)
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: github-actions
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Resolve Maven project version
+        id: maven-version
+        run: |
+          VERSION=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
+          echo "raw_version=$VERSION" >> $GITHUB_OUTPUT
+          # Normalize SNAPSHOT to a readable pre-release tag (optional)
+          if [[ "$VERSION" == *"SNAPSHOT" ]]; then
+            SEMVER=${VERSION//-SNAPSHOT/-dev}
+          else
+            SEMVER=$VERSION
+          fi
+          echo "semver=$SEMVER" >> $GITHUB_OUTPUT
+
+      - name: Create ECR repository if not exists
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+      - name: Tag and push image(s) to ECR (semver + sha)
+        run: |
+          REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          REPO=${{ secrets.ECR_REPOSITORY }}
+          SHA=${{ github.sha }}
+          SEMVER=${{ steps.maven-version.outputs.semver }}
+
+          # Local image built by paketo buildpacks
+          LOCAL_IMAGE=demo:0.0.1-SNAPSHOT
+
+          # Tag images
+          docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:$SEMVER"
+          docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:$SHA"
+
+          # Push both tags
+          docker push "$REGISTRY/$REPO:$SEMVER"
+          docker push "$REGISTRY/$REPO:$SHA"
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
