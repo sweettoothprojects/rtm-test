@@ -80,6 +80,7 @@ jobs:
           echo "SEMVER=$semver" >> $GITHUB_ENV
 
       - name: Compute appendVersion
+        id: append_version
         run: |
           appendVersion=$(echo $SEMVER | awk -F. -v OFS=. '{$NF += 1 ; print}')
           echo "appendVersion=$appendVersion" >> $GITHUB_OUTPUT
@@ -117,7 +118,7 @@ jobs:
           REPO=${{ secrets.ECR_REPOSITORY }}
           SHA=${{ github.sha }}
           PROJECT_VERSION=${{ steps.version.outputs.projectVersion }}
-          APPEND=${{ steps.version.outputs.appendVersion }}
+          APPEND=${{ steps.append_version.outputs.appendVersion }}
 
           # Determine local image name
           LOCAL_IMAGE=${{ inputs.docker_image }}
