@@ -89,10 +89,31 @@ jobs:
           IMAGE_TAG_VAL="${IMAGE_TAG_INPUT:-${COMMIT:-}}"
           REPO_NAME="${ECR_REPOSITORY}"
           DIGEST=""
-          if command -v aws >/dev/null 2>&1; then
-            DIGEST=$(aws ecr batch-get-image --repository-name "$REPO_NAME" --image-ids imageTag="$IMAGE_TAG_VAL" --query 'images[0].imageId.imageDigest' --output text 2>/dev/null || true)
+          if ! command -v aws >/dev/null 2>&1; then
+            echo "aws CLI not found on runner"
+            echo "image_digest=" >> $GITHUB_OUTPUT
+            echo "IMAGE_DIGEST=" >> $GITHUB_ENV
+            exit 0
           fi
-          echo "image_digest=$DIGEST" >> $GITHUB_OUTPUT
+
+          echo "IMAGE_TAG_VAL=${IMAGE_TAG_VAL}"
+          echo "REPO_NAME=${REPO_NAME}"
+          # show which identity is being used (non-secret)
+          aws sts get-caller-identity || true
+
+          # Prefer describe-images for robust digest lookup and better diagnostics
+          RAW=$(aws ecr describe-images --repository-name "$REPO_NAME" --image-ids imageTag="$IMAGE_TAG_VAL" --region "${AWS_REGION:-}" --output json 2>&1 || true)
+          echo "raw describe-images output:"
+          echo "$RAW"
+
+          DIGEST=$(echo "$RAW" | jq -r '.imageDetails[0].imageDigest // empty' || true)
+          echo "extracted digest: ${DIGEST}"
+
+          # expose as step output and persist into job env for later steps
+          echo "image_digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "IMAGE_DIGEST=${DIGEST}" >> $GITHUB_ENV
+
+
 
       - name: Resolve Octopus ProjectId by slug
         id: resolve-project
