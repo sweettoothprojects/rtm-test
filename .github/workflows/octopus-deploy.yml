@@ -1,47 +1,125 @@
 name: Octopus deploy
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   create-release:
     runs-on: ubuntu-latest
+    env:
+      # Prefer repository secrets. Set these in GitHub: Settings > Secrets
+      DOCKER_IMAGE: ${{ secrets.REPO_DOCKER_IMAGE }}
+      IMAGE_TAG_INPUT: ${{ secrets.REPO_IMAGE_TAG }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_ACCOUNT_ID: ${{ secrets.ECR_ACCOUNT_ID }}
+      # Expose GitHub context into env variables for shell steps
+      GITHUB_SHA: ${{ github.sha }}
+      GITHUB_REF: ${{ github.ref }}
+      GITHUB_RUN_ID: ${{ github.run_id }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate ECR image pull
+      - name: Set provenance environment
+        run: |
+          # Use job-level env values (safer for YAML parsing)
+          echo "COMMIT=${GITHUB_SHA}" >> $GITHUB_ENV
+          # derive branch name from GITHUB_REF
+          BRANCH_NAME=$(echo "${GITHUB_REF}" | sed -e 's@^refs/heads/@@') || true
+          echo "BRANCH=${BRANCH_NAME}" >> $GITHUB_ENV
+          echo "BUILD_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${GITHUB_RUN_ID}" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Validate image (local or ECR)
+        id: validate-pull
         run: |
           set -euo pipefail
 
-          AWS_REGION="${{ secrets.AWS_REGION }}"
-          AWS_ACCOUNT="${{ secrets.ECR_ACCOUNT_ID }}"
-          IMAGE_NAME="${{ secrets.TEST_IMAGE_NAME }}"
-          IMAGE_TAG="${{ secrets.TEST_IMAGE_TAG }}"
+          # Resolve values in shell
+          LOCAL_IMAGE="${DOCKER_IMAGE:-}"
+          TARGET_NAME="${ECR_REPOSITORY}"
+          IMAGE_TAG_VAL="${IMAGE_TAG_INPUT:-${COMMIT:-}}"
 
-          # Get ECR login and verify docker can pull the image
-          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+          REGISTRY="${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-          FULL_IMAGE="$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:$IMAGE_TAG"
-          echo "Attempting to pull $FULL_IMAGE"
+          if [ -n "$LOCAL_IMAGE" ]; then
+            echo "Attempting to pull local image name: $LOCAL_IMAGE"
+            if docker pull "$LOCAL_IMAGE"; then
+              echo "pulled_local=true" >> $GITHUB_OUTPUT
+              echo "Pulled $LOCAL_IMAGE successfully"
+              exit 0
+            else
+              echo "Local image pull failed, will try ECR image"
+            fi
+          fi
+
+          FULL_IMAGE="$REGISTRY/$TARGET_NAME:$IMAGE_TAG_VAL"
+          echo "Attempting to pull ECR image $FULL_IMAGE"
           docker pull "$FULL_IMAGE"
+          echo "pulled_local=false" >> $GITHUB_OUTPUT
 
-      - name: Create Octopus release
+      - name: Get image digest
+        id: get-digest
         run: |
-          OCTOPUS_API_KEY="${{ secrets.OCTOPUS_API_KEY }}"
-          OCTOPUS_SERVER="${{ secrets.OCTOPUS_SERVER }}"
-          OCTOPUS_PROJECT_ID="${{ secrets.OCTOPUS_PROJECT_ID }}"
-          IMAGE_NAME="${{ secrets.TEST_IMAGE_NAME }}"
-          IMAGE_TAG="${{ secrets.TEST_IMAGE_TAG }}"
+          set -euo pipefail
+          IMAGE_TAG_VAL="${IMAGE_TAG_INPUT:-${COMMIT:-}}"
+          REPO_NAME="${ECR_REPOSITORY}"
+          DIGEST=""
+          if command -v aws >/dev/null 2>&1; then
+            DIGEST=$(aws ecr batch-get-image --repository-name "$REPO_NAME" --image-ids imageTag="$IMAGE_TAG_VAL" --query 'images[0].imageId.imageDigest' --output text 2>/dev/null || true)
+          fi
+          echo "image_digest=$DIGEST" >> $GITHUB_OUTPUT
 
-          PAYLOAD=$(jq -n \
-            --arg projectId "$OCTOPUS_PROJECT_ID" \
-            --arg version "$IMAGE_TAG" \
-            --arg imageTag "$IMAGE_TAG" \
-            --arg imageName "$IMAGE_NAME" \
-            '{ProjectId: $projectId, Version: $version, SelectedPackages: [], ReleaseNotes: "Created from CI (image pull validated)", Variables: { ImageTag: $imageTag, ImageName: $imageName }}')
+      - name: Build Octopus release payload
+        id: build-payload
+        env:
+          OCTOPUS_PROJECT_ID: ${{ secrets.OCTOPUS_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          # If DOCKER_IMAGE not provided, try to compute the local image name from Maven (artifactId:version)
+          if [ -z "${DOCKER_IMAGE:-}" ]; then
+            ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec || true)
+            PROJECT_VERSION=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec || true)
+            ARTIFACT_ID=${ARTIFACT_ID:-demo}
+            PROJECT_VERSION=${PROJECT_VERSION:-${COMMIT}}
+            LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
+          fi
 
-          curl -sS -X POST "$OCTOPUS_SERVER/api/releases" \
-            -H "X-Octopus-ApiKey: $OCTOPUS_API_KEY" \
+          IMAGE_TAG_VAL="${IMAGE_TAG_INPUT:-${COMMIT:-}}"
+          REGISTRY="${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE_DIGEST="${{ steps.get-digest.outputs.image_digest }}"
+          COMMIT_ID="${COMMIT}"
+          BRANCH_NAME="${BRANCH}"
+          BUILD_URL_VAL="${BUILD_URL}"
+
+          # Build JSON safely via printf to avoid YAML parsing issues
+          printf '{"ProjectId":"%s","Version":"%s","SelectedPackages":[],"ReleaseNotes":"Created from CI (image pull validated)","Variables":{"ImageTag":"%s","ImageName":"%s","Registry":"%s","ImageDigest":"%s","Commit":"%s","Branch":"%s","BuildUrl":"%s"}}' "${OCTOPUS_PROJECT_ID}" "${IMAGE_TAG_VAL}" "${IMAGE_TAG_VAL}" "${ECR_REPOSITORY}" "${REGISTRY}" "${IMAGE_DIGEST}" "${COMMIT_ID}" "${BRANCH_NAME}" "${BUILD_URL_VAL}" > octopus_payload.json
+
+          echo "payload_file=octopus_payload.json" >> $GITHUB_OUTPUT
+
+      - name: Post Octopus release
+        env:
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
+          PAYLOAD_FILE: ${{ steps.build-payload.outputs.payload_file }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "${PAYLOAD_FILE}" ]; then
+            echo "Payload file not found: ${PAYLOAD_FILE}"
+            exit 1
+          fi
+
+          curl -sS -X POST "${OCTOPUS_SERVER}/api/releases" \
+            -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            --data-binary @"${PAYLOAD_FILE}"
