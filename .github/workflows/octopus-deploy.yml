@@ -2,10 +2,18 @@ name: Octopus deploy
 
 on:
   workflow_dispatch: {}
+  # Run automatically after the CI workflow completes successfully on the main branch
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
 
 jobs:
   create-release:
     runs-on: ubuntu-latest
+    # Only run this job automatically when the triggering workflow (CI) completed successfully
+    # For manual workflow_dispatch this job will still run.
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     env:
       # Prefer repository secrets. Set these in GitHub: Settings > Secrets
       DOCKER_IMAGE: ${{ secrets.REPO_DOCKER_IMAGE }}
@@ -13,6 +21,8 @@ jobs:
       ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       ECR_ACCOUNT_ID: ${{ secrets.ECR_ACCOUNT_ID }}
+      # Octopus project slug configurable via repo variable (set in Settings > Variables)
+      OCTOPUS_PROJECT_SLUG: ${{ vars.OCTOPUS_PROJECT_SLUG }}
       # Expose GitHub context into env variables for shell steps
       GITHUB_SHA: ${{ github.sha }}
       GITHUB_REF: ${{ github.ref }}
@@ -80,10 +90,28 @@ jobs:
           fi
           echo "image_digest=$DIGEST" >> $GITHUB_OUTPUT
 
+      - name: Resolve Octopus ProjectId by slug
+        id: resolve-project
+        env:
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
+        run: |
+          set -euo pipefail
+          # Use repository variable if set, otherwise fall back to rtm-test
+          SLUG="${OCTOPUS_PROJECT_SLUG:-rtm-test}"
+          PROJECT_ID=""
+          if [ -n "${OCTOPUS_API_KEY:-}" ] && [ -n "${OCTOPUS_SERVER:-}" ]; then
+            # Query projects and filter by slug. The API returns an array of projects.
+            PROJECT_ID=$(curl -sS -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" "${OCTOPUS_SERVER}/api/projects/all" | jq -r --arg slug "$SLUG" '.[] | select(.Slug==$slug) | .Id' || true)
+          fi
+          PROJECT_ID=${PROJECT_ID:-}
+          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
+
       - name: Build Octopus release payload
         id: build-payload
         env:
           OCTOPUS_PROJECT_ID: ${{ secrets.OCTOPUS_PROJECT_ID }}
+          RESOLVED_PROJECT_ID: ${{ steps.resolve-project.outputs.project_id }}
         run: |
           set -euo pipefail
           # If DOCKER_IMAGE not provided, try to compute the local image name from Maven (artifactId:version)
@@ -103,7 +131,14 @@ jobs:
           BUILD_URL_VAL="${BUILD_URL}"
 
           # Build JSON safely via printf to avoid YAML parsing issues
-          printf '{"ProjectId":"%s","Version":"%s","SelectedPackages":[],"ReleaseNotes":"Created from CI (image pull validated)","Variables":{"ImageTag":"%s","ImageName":"%s","Registry":"%s","ImageDigest":"%s","Commit":"%s","Branch":"%s","BuildUrl":"%s"}}' "${OCTOPUS_PROJECT_ID}" "${IMAGE_TAG_VAL}" "${IMAGE_TAG_VAL}" "${ECR_REPOSITORY}" "${REGISTRY}" "${IMAGE_DIGEST}" "${COMMIT_ID}" "${BRANCH_NAME}" "${BUILD_URL_VAL}" > octopus_payload.json
+          # Prefer explicit OCTOPUS_PROJECT_ID secret; fall back to resolved project id by slug
+          PROJECT_ID_TO_USE="${OCTOPUS_PROJECT_ID:-}${RESOLVED_PROJECT_ID:-}"
+          # If both are set, prefer the explicit secret
+          if [ -n "${OCTOPUS_PROJECT_ID:-}" ]; then
+            PROJECT_ID_TO_USE="${OCTOPUS_PROJECT_ID}"
+          fi
+
+          printf '{"ProjectId":"%s","Version":"%s","SelectedPackages":[],"ReleaseNotes":"Created from CI (image pull validated)","Variables":{"ImageTag":"%s","ImageName":"%s","Registry":"%s","ImageDigest":"%s","Commit":"%s","Branch":"%s","BuildUrl":"%s"}}' "${PROJECT_ID_TO_USE}" "${IMAGE_TAG_VAL}" "${IMAGE_TAG_VAL}" "${ECR_REPOSITORY}" "${REGISTRY}" "${IMAGE_DIGEST}" "${COMMIT_ID}" "${BRANCH_NAME}" "${BUILD_URL_VAL}" > octopus_payload.json
 
           echo "payload_file=octopus_payload.json" >> $GITHUB_OUTPUT
 
