@@ -1,5 +1,9 @@
 name: Octopus deploy
 
+permissions:
+  id-token: write
+  contents: read
+
 on:
   workflow_dispatch: {}
   # Run automatically after the CI workflow completes successfully on the main branch
