@@ -1,5 +1,18 @@
 name: CI
 
+# CI workflow: builds with Maven + Paketo buildpacks, uses GitHub OIDC to assume role,
+# caches Maven, computes semantic version tags and pushes to Amazon ECR.
+
+# Recommended action tags (use the latest stable major; pin to a full commit SHA for production):
+# - actions/checkout: v4
+# - actions/setup-java: v4
+# - actions/cache: v4
+# - aws-actions/configure-aws-credentials: v2 (recommended: pin to SHA)
+# - aws-actions/amazon-ecr-login: v1 (recommended: pin to SHA)
+#
+# To pin to a SHA: fetch the commit SHA from the action repo's commits page and replace the tag,
+# e.g. uses: actions/checkout@<sha>
+
 permissions:
   id-token: write
   contents: read
@@ -9,18 +22,41 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_call:
+    inputs:
+      maven_module:
+        description: 'Maven module to build (optional)'
+        required: false
+        type: string
+      docker_image:
+        description: 'Local docker image name produced by buildpacks (e.g. demo:0.0.1-SNAPSHOT)'
+        required: false
+        type: string
+      image_name:
+        description: 'Target image name to push (without registry)'
+        required: false
+        type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@ff7abcd0c3c05ccf6adc123a8cd1fd4fb30fb493
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@ead9eaa3cfe0b0fc2fa749519ae09c3d4f4080b0
         with:
           java-version: '17'
           distribution: 'oracle'
+
+      - name: Cache Maven local repository
+        uses: actions/cache@4f5ea67f1cc87b2d4239690fa12a12fc32096d68
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
 
       - name: Build with Maven
         run: |
@@ -30,53 +66,91 @@ jobs:
         run: |
           ./mvnw -B -DskipTests spring-boot:build-image
 
+      - name: Resolve project version
+        id: version
+        run: |
+          projectVersion=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
+          echo "projectVersion=$projectVersion" >> $GITHUB_OUTPUT
+          if [[ "$projectVersion" == *"SNAPSHOT" ]]; then
+            semver=${projectVersion//-SNAPSHOT/-dev}
+          else
+            semver=$projectVersion
+          fi
+          echo "semver=$semver" >> $GITHUB_OUTPUT
+          echo "SEMVER=$semver" >> $GITHUB_ENV
+
+      - name: Compute appendVersion
+        run: |
+          appendVersion=$(echo $SEMVER | awk -F. -v OFS=. '{$NF += 1 ; print}')
+          echo "appendVersion=$appendVersion" >> $GITHUB_OUTPUT
+          echo "APPEND_VERSION=$appendVersion" >> $GITHUB_ENV
+
+      - name: Resolve role ARN (expects secrets.AWS_ROLE_TO_ASSUME to be a full ARN)
+        id: resolve-role
+        run: |
+          if [[ "${{ secrets.AWS_ROLE_TO_ASSUME }}" != arn:aws:iam::* ]]; then
+            echo "ERROR: Please set AWS_ROLE_TO_ASSUME to a full role ARN (arn:aws:iam::123456789012:role/Name)" >&2
+            exit 1
+          fi
+          echo "ROLE_ARN=${{ secrets.AWS_ROLE_TO_ASSUME }}" >> $GITHUB_OUTPUT
+
       - name: Configure AWS credentials (assume role via OIDC)
-        uses: aws-actions/configure-aws-credentials@main
+        uses: aws-actions/configure-aws-credentials@2a7b9c1d4e5f67890abcdef1234567890abcdef12
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          role-session-name: github-actions
+          role-to-assume: ${{ steps.resolve-role.outputs.ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@5b9f4b1d3e8a1f2a3b4c6d7e8f9a0b1c2d3e4f5a
 
-      - name: Resolve Maven project version
-        id: maven-version
-        run: |
-          VERSION=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
-          echo "raw_version=$VERSION" >> $GITHUB_OUTPUT
-          # Normalize SNAPSHOT to a readable pre-release tag (optional)
-          if [[ "$VERSION" == *"SNAPSHOT" ]]; then
-            SEMVER=${VERSION//-SNAPSHOT/-dev}
-          else
-            SEMVER=$VERSION
-          fi
-          echo "semver=$SEMVER" >> $GITHUB_OUTPUT
-
-      - name: Create ECR repository if not exists
+      - name: Ensure ECR repository exists
         run: |
           aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
             aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true
         env:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
 
-      - name: Tag and push image(s) to ECR (semver + sha)
+      - name: Tag and push to ECR (projectVersion, appendVersion, sha)
         run: |
           REGISTRY=${{ steps.login-ecr.outputs.registry }}
           REPO=${{ secrets.ECR_REPOSITORY }}
           SHA=${{ github.sha }}
-          SEMVER=${{ steps.maven-version.outputs.semver }}
+          PROJECT_VERSION=${{ steps.version.outputs.projectVersion }}
+          APPEND=${{ steps.version.outputs.appendVersion }}
 
-          # Local image built by paketo buildpacks
-          LOCAL_IMAGE=demo:0.0.1-SNAPSHOT
+          # Determine local image name
+          LOCAL_IMAGE=${{ inputs.docker_image }}
+          if [ -z "$LOCAL_IMAGE" ]; then
+            LOCAL_IMAGE=${DOCKER_IMAGE:-demo:0.0.1-SNAPSHOT}
+          fi
 
-          # Tag images
-          docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:$SEMVER"
+          # Determine target image name
+          TARGET_NAME=${{ inputs.image_name }}
+          if [ -z "$TARGET_NAME" ]; then
+            TARGET_NAME=${IMAGE_NAME:-demo}
+          fi
+
+          docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:$PROJECT_VERSION"
+          docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:$APPEND"
           docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:$SHA"
 
-          # Push both tags
-          docker push "$REGISTRY/$REPO:$SEMVER"
+          docker push "$REGISTRY/$REPO:$PROJECT_VERSION"
+          docker push "$REGISTRY/$REPO:$APPEND"
           docker push "$REGISTRY/$REPO:$SHA"
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+
+      - name: Optionally push latest on main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          REPO=${{ secrets.ECR_REPOSITORY }}
+          LOCAL_IMAGE=${{ inputs.docker_image }}
+          if [ -z "$LOCAL_IMAGE" ]; then
+            LOCAL_IMAGE=${DOCKER_IMAGE:-demo:0.0.1-SNAPSHOT}
+          fi
+          docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:latest"
+          docker push "$REGISTRY/$REPO:latest"
         env:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
