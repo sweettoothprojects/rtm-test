@@ -140,8 +140,7 @@ jobs:
           docker push "$REGISTRY/$TARGET_NAME:$PROJECT_VERSION"
           docker push "$REGISTRY/$TARGET_NAME:$APPEND"
           docker push "$REGISTRY/$TARGET_NAME:$SHA"
-        env:
-          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+        # Use job-level env for ECR_REPOSITORY
 
       - name: Optionally push latest on main
         if: github.ref == 'refs/heads/main'
@@ -159,5 +158,4 @@ jobs:
           fi
           docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:latest"
           docker push "$REGISTRY/$REPO:latest"
-        env:
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        # Use job-level env for ECR_REPOSITORY
