@@ -1,0 +1,47 @@
+name: Octopus deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate ECR image pull
+        run: |
+          set -euo pipefail
+
+          AWS_REGION="${{ secrets.AWS_REGION }}"
+          AWS_ACCOUNT="${{ secrets.ECR_ACCOUNT_ID }}"
+          IMAGE_NAME="${{ secrets.TEST_IMAGE_NAME }}"
+          IMAGE_TAG="${{ secrets.TEST_IMAGE_TAG }}"
+
+          # Get ECR login and verify docker can pull the image
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+          FULL_IMAGE="$AWS_ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME:$IMAGE_TAG"
+          echo "Attempting to pull $FULL_IMAGE"
+          docker pull "$FULL_IMAGE"
+
+      - name: Create Octopus release
+        run: |
+          OCTOPUS_API_KEY="${{ secrets.OCTOPUS_API_KEY }}"
+          OCTOPUS_SERVER="${{ secrets.OCTOPUS_SERVER }}"
+          OCTOPUS_PROJECT_ID="${{ secrets.OCTOPUS_PROJECT_ID }}"
+          IMAGE_NAME="${{ secrets.TEST_IMAGE_NAME }}"
+          IMAGE_TAG="${{ secrets.TEST_IMAGE_TAG }}"
+
+          PAYLOAD=$(jq -n \
+            --arg projectId "$OCTOPUS_PROJECT_ID" \
+            --arg version "$IMAGE_TAG" \
+            --arg imageTag "$IMAGE_TAG" \
+            --arg imageName "$IMAGE_NAME" \
+            '{ProjectId: $projectId, Version: $version, SelectedPackages: [], ReleaseNotes: "Created from CI (image pull validated)", Variables: { ImageTag: $imageTag, ImageName: $imageName }}')
+
+          curl -sS -X POST "$OCTOPUS_SERVER/api/releases" \
+            -H "X-Octopus-ApiKey: $OCTOPUS_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
