@@ -10,7 +10,7 @@ import org.springframework.http.ResponseEntity;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-public class GreetingControllerTest {
+class GreetingControllerTest {
 
     @LocalServerPort
     private int port;
@@ -19,7 +19,7 @@ public class GreetingControllerTest {
     private TestRestTemplate restTemplate;
 
     @Test
-    public void greetShouldReturnDefaultMessage() {
+    void greetShouldReturnDefaultMessage() {
         ResponseEntity<String> entity = restTemplate.getForEntity("http://localhost:" + port + "/greet", String.class);
         assertThat(entity.getStatusCode().is2xxSuccessful()).isTrue();
         assertThat(entity.getBody()).contains("Hello");
