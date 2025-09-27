@@ -72,19 +72,11 @@ jobs:
           base_path: ${{ github.workspace }}/octopus-payload
           files: '**/*'
 
-      - name: Push Build Information
+      - name: Push build information to Octopus Deploy 🐙
         uses: OctopusDeploy/push-build-information-action@v3
-        env:
-          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
-          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
-          OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
         with:
-          server: ${{ env.OCTOPUS_SERVER }}
-          api_key: ${{ env.OCTOPUS_API_KEY }}
           packages: |
-            [
-              {"packageId":"${{ env.PACKAGE_ID }}","version":"${{ env.PAYLOAD_VERSION }}"}
-            ]
+            ${{ env.PACKAGE_ID }}
           version: ${{ env.PAYLOAD_VERSION }}
 
       - name: Create a release in Octopus Deploy
