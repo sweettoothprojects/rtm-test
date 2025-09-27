@@ -49,19 +49,22 @@ jobs:
       - name: File contents
         run: echo "${{ steps.read-payload.outputs.contents }}"
 
-      - name: Package
+      - name: Extract Maven coordinates
+        run: |
+          set -euo pipefail
+          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout || true)
+          PROJECT_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout || true)
+          echo "PACKAGE_ID=$ARTIFACT_ID" >> $GITHUB_ENV
+          echo "PAYLOAD_VERSION=$PROJECT_VERSION" >> $GITHUB_ENV
+
+      - name: Create a Zip package
         uses: OctopusDeploy/create-zip-package-action@v3
-        env:
-          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
-          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
-          GITHUB_WORKSPACE: ${{ github.workspace }}
         with:
-          server: ${{ env.OCTOPUS_SERVER }}
-          api_key: ${{ env.OCTOPUS_API_KEY }}
           package_id: ${{ env.PACKAGE_ID }}
-          package_version: ${{ env.PAYLOAD_VERSION }}
-          source_path: ${{ env.GITHUB_WORKSPACE }}
-          output_folder: ${{ env.GITHUB_WORKSPACE }}/artifacts
+          version: ${{ env.PAYLOAD_VERSION }}
+          output_folder: ${{ github.workspace }}/artifacts
+          base_path: ${{ github.workspace }}/octopus-payload
+          files: '**/*'
 
       - name: Push Build Information
         uses: OctopusDeploy/push-build-information-action@v3
