@@ -47,18 +47,28 @@ jobs:
         run: |
           ./mvnw -B clean install -DskipTests -DskipIt -U
 
+      - name: Resolve Maven coordinates
+        id: resolve-maven
+        run: |
+          set -euo pipefail
+          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout || true)
+          PROJECT_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout || true)
+          GROUP_ID=$(./mvnw help:evaluate -Dexpression=project.groupId -q -DforceStdout || true)
+          echo "artifact_id=${ARTIFACT_ID}" >> $GITHUB_OUTPUT
+          echo "project_version=${PROJECT_VERSION}" >> $GITHUB_OUTPUT
+          echo "group_id=${GROUP_ID}" >> $GITHUB_OUTPUT
+
       - name: Build module image
         run: |
-          # Determine the module to build from the project's artifactId
-          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
+          ARTIFACT_ID=${{ steps.resolve-maven.outputs.artifact_id }}
           # Build the module by artifactId (use :artifactId form) and also build required modules (-am)
           ./mvnw -B package -pl ":${ARTIFACT_ID}" -am spring-boot:build-image -DskipTests -DskipIt
 
       - name: Resolve project version
         id: version
         run: |
-          # Use Maven help:evaluate to reliably read project.version
-          projectVersion=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)
+          # Use the project_version resolved earlier to avoid running mvnw multiple times
+          projectVersion="${{ steps.resolve-maven.outputs.project_version }}"
           echo "projectVersion=$projectVersion" >> $GITHUB_OUTPUT
           if [[ "$projectVersion" == *"SNAPSHOT" ]]; then
             semver=${projectVersion//-SNAPSHOT/-dev}
@@ -68,25 +78,12 @@ jobs:
           echo "semver=$semver" >> $GITHUB_OUTPUT
           echo "SEMVER_VERSION=$semver" >> $GITHUB_ENV
 
-      - name: Compute appendVersion
-        id: append_version
-        run: |
-          appendVersion=$(echo $SEMVER_VERSION | awk -F. -v OFS=. '{$NF += 1 ; print}')
-          echo "appendVersion=$appendVersion" >> $GITHUB_OUTPUT
-          echo "APPEND_VERSION=$appendVersion" >> $GITHUB_ENV
-
-      - name: Build Octopus payload
-        run: |
-          set -euo pipefail
-          # Extract Maven coordinates for payload
-          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout || true)
-          PROJECT_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout || true)
-          GROUP_ID=$(./mvnw help:evaluate -Dexpression=project.groupId -q -DforceStdout || true)
-          REGISTRY="${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          REPO="${ECR_REPOSITORY}"
-          BRANCH_NAME=$(echo "${GITHUB_REF}" | sed -e 's@^refs/heads/@@') || true
-
-          printf '%s' "{\"ProjectId\":\"${OCTOPUS_PROJECT_SLUG:-}\",\"Version\":\"${PROJECT_VERSION}\",\"SelectedPackages\":[],\"ReleaseNotes\":\"Created from CI\",\"Variables\":{\"ImageTag\":\"${PROJECT_VERSION}\",\"ImageName\":\"${REPO}\",\"Registry\":\"${REGISTRY}\",\"Commit\":\"${GITHUB_SHA}\",\"Branch\":\"${BRANCH_NAME}\",\"BuildUrl\":\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\",\"ProjectVersion\":\"${PROJECT_VERSION}\"},\"package_id\":\"${GROUP_ID}\"}" > octopus_payload.json
+      - name: Build Octopus payload (create file)
+        uses: finnp/create-file-action@master
+        env:
+          FILE_NAME: "octopus_payload.json"
+          FILE_DATA: >
+            {"ProjectId":"${{ vars.OCTOPUS_PROJECT_SLUG }}","Version":"${{ steps.resolve-maven.outputs.project_version }}","SelectedPackages":[],"ReleaseNotes":"Created from CI","Variables":{"ImageTag":"${{ steps.resolve-maven.outputs.project_version }}","ImageName":"${{ env.ECR_REPOSITORY }}","Registry":"${{ env.ECR_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com","Commit":"${{ github.sha }}","Branch":"${{ github.ref }}","BuildUrl":"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}","ProjectVersion":"${{ steps.resolve-maven.outputs.project_version }}"},"package_id":"${{ steps.resolve-maven.outputs.group_id }}"}
 
       - name: Upload Octopus payload
         uses: actions/upload-artifact@v4
@@ -94,33 +91,11 @@ jobs:
           name: octopus-payload
           path: octopus_payload.json
 
-      - name: Create and upload build-info
-        run: |
-          set -euo pipefail
-          # create a small JSON with the tags we pushed
-          PROJECT_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout || true)
-          echo "{\"projectVersion\":\"${PROJECT_VERSION}\",\"appendVersion\":\"${APPEND_VERSION:-}\",\"sha\":\"${GITHUB_SHA}\"}" > build-info.json
-        # upload build info for downstream workflows
-      - name: Upload build-info artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-info
-          path: build-info.json
-
-      - name: Resolve role ARN (expects AWS_ROLE_TO_ASSUME env to be a full ARN)
-        id: resolve-role
-        run: |
-          if [[ "${AWS_ROLE_TO_ASSUME}" != arn:aws:iam::* ]]; then
-            echo "ERROR: Please set AWS_ROLE_TO_ASSUME to a full role ARN (arn:aws:iam::123456789012:role/Name)" >&2
-            exit 1
-          fi
-          echo "ROLE_ARN=${AWS_ROLE_TO_ASSUME}" >> $GITHUB_OUTPUT
-
-      - name: Configure AWS credentials (assume role via OIDC)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ steps.resolve-role.outputs.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -131,43 +106,35 @@ jobs:
           aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
             aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true
 
-      - name: Tag and push to ECR (projectVersion, appendVersion, sha)
+      - name: Tag and push to ECR (projectVersion, sha)
         run: |
           set -euo pipefail
           REGISTRY=${{ steps.login-ecr.outputs.registry }}
           REPO=${ECR_REPOSITORY}
           SHA=${{ github.sha }}
           PROJECT_VERSION=${{ steps.version.outputs.projectVersion }}
-          APPEND=${{ steps.append_version.outputs.appendVersion }}
 
-          # Determine local image name from Maven (artifactId:projectVersion)
-          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
+          # Use resolved artifactId
+          ARTIFACT_ID=${{ steps.resolve-maven.outputs.artifact_id }}
           LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
 
           # Target name = ECR repository (no separate IMAGE_NAME)
           TARGET_NAME="$REPO"
 
           docker tag "$LOCAL_IMAGE" "$REGISTRY/$TARGET_NAME:$PROJECT_VERSION"
-          docker tag "$LOCAL_IMAGE" "$REGISTRY/$TARGET_NAME:$APPEND"
           docker tag "$LOCAL_IMAGE" "$REGISTRY/$TARGET_NAME:$SHA"
 
           docker push "$REGISTRY/$TARGET_NAME:$PROJECT_VERSION"
-          docker push "$REGISTRY/$TARGET_NAME:$APPEND"
           docker push "$REGISTRY/$TARGET_NAME:$SHA"
-        # Use job-level env for ECR_REPOSITORY
 
-      - name: Optionally push latest on main
+      - name: Push latest on main branch
         if: github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
           REGISTRY=${{ steps.login-ecr.outputs.registry }}
           REPO=${ECR_REPOSITORY}
-          # compute image name from Maven
-          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout || true)
-          if [ -z "${ARTIFACT_ID:-}" ]; then
-            echo "ERROR: Could not determine artifactId from Maven. Ensure mvnw is present and pom.xml defines artifactId."
-            exit 1
-          fi
+          # use resolved artifactId
+          ARTIFACT_ID=${{ steps.resolve-maven.outputs.artifact_id }}
           PROJECT_VERSION=${{ steps.version.outputs.projectVersion }}
           LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
           docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:latest"

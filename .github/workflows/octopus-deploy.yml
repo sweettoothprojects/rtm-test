@@ -19,84 +19,34 @@ jobs:
     # For manual workflow_dispatch this job will still run.
     if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     env:
-      # Prefer repository secrets. Set these in GitHub: Settings > Secrets
-      IMAGE_TAG_INPUT: ${{ secrets.REPO_IMAGE_TAG }}
-      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      ECR_ACCOUNT_ID: ${{ secrets.ECR_ACCOUNT_ID }}
       # Octopus project slug configurable via repo variable (set in Settings > Variables)
       OCTOPUS_PROJECT_SLUG: ${{ vars.OCTOPUS_PROJECT_SLUG }}
       # Control whether the workflow will pack & push a package to Octopus (set to 'true' to enable)
       OCTOPUS_PUSH_PACKAGE: ${{ vars.OCTOPUS_PUSH_PACKAGE }}
       # Expose GitHub context into env variables for shell steps
-      GITHUB_SHA: ${{ github.sha }}
-      GITHUB_REF: ${{ github.ref }}
-      GITHUB_RUN_ID: ${{ github.run_id }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Octopus payload from triggering CI run
+      - name: Download multiple artifacts from triggering CI run
         if: github.event_name == 'workflow_run'
-        uses: actions/download-artifact@v4
+        uses: marcofaggian/action-download-multiple-artifacts@v1
         with:
-          name: octopus-payload
-          run-id: ${{ github.event.workflow_run.id }}
-          path: ${{ github.workspace }}
+          names: octopus-payload
+          paths: octopus-payload
+          workflow: ci.yml
+          workflow_conclusion: success
+          repo: ${{ github.repository }}
 
-
-      - name: Load payload metadata
-        id: load-payload
-        run: |
-          set -euo pipefail
-          if [ ! -f "$GITHUB_WORKSPACE/octopus_payload.json" ]; then
-            echo "ERROR: expected octopus_payload.json artifact to be present (uploaded by CI)." >&2
-            exit 1
-          fi
-          # Read JSON fields using a tiny jq invocation if available, otherwise use grep/awk
-          if command -v jq >/dev/null 2>&1; then
-            PACKAGE_ID=$(jq -r '.package_id // empty' "$GITHUB_WORKSPACE/octopus_payload.json")
-            VERSION=$(jq -r '.Version // empty' "$GITHUB_WORKSPACE/octopus_payload.json")
-          else
-            PACKAGE_ID=$(grep -o '"package_id"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/octopus_payload.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
-            VERSION=$(grep -o '"Version"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/octopus_payload.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
-          fi
-          echo "package_id=${PACKAGE_ID}" >> $GITHUB_OUTPUT
-          echo "payload_version=${VERSION}" >> $GITHUB_OUTPUT
-
-      - name: Download build-info from triggering CI run
-        if: github.event_name == 'workflow_run'
-        uses: actions/download-artifact@v4
+      - name: Read octopus payload file
+        id: read-payload
+        uses: andstor/file-reader-action@v1
         with:
-          name: build-info
-          run-id: ${{ github.event.workflow_run.id }}
-          path: ${{ github.workspace }}
+          path: ${{ github.workspace }}/octopus-payload/octopus_payload.json
 
-
-      - name: Load build-info
-        id: load-build-info
-        run: |
-          set -euo pipefail
-          if [ ! -f "$GITHUB_WORKSPACE/build-info.json" ]; then
-            echo "ERROR: expected build-info.json artifact to be present (uploaded by CI)." >&2
-            exit 1
-          fi
-          if command -v jq >/dev/null 2>&1; then
-            PROJECT_VERSION=$(jq -r '.projectVersion // empty' "$GITHUB_WORKSPACE/build-info.json")
-            APPEND_VERSION=$(jq -r '.appendVersion // empty' "$GITHUB_WORKSPACE/build-info.json")
-            SHA=$(jq -r '.sha // empty' "$GITHUB_WORKSPACE/build-info.json")
-          else
-            PROJECT_VERSION=$(grep -o '"projectVersion"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/build-info.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
-            APPEND_VERSION=$(grep -o '"appendVersion"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/build-info.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
-            SHA=$(grep -o '"sha"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/build-info.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
-          fi
-          echo "PROJECT_VERSION=${PROJECT_VERSION}" >> $GITHUB_ENV
-          echo "APPEND_VERSION=${APPEND_VERSION}" >> $GITHUB_ENV
-          echo "IMAGE_SHA=${SHA}" >> $GITHUB_ENV
-          echo "build_project_version=${PROJECT_VERSION}" >> $GITHUB_OUTPUT
-          echo "build_append_version=${APPEND_VERSION}" >> $GITHUB_OUTPUT
-          echo "build_sha=${SHA}" >> $GITHUB_OUTPUT
+      - name: File contents
+        run: echo "${ steps.read-payload.outputs.contents }"
 
       - name: Package
         uses: OctopusDeploy/create-zip-package-action@v3
@@ -107,8 +57,8 @@ jobs:
         with:
           server: ${{ env.OCTOPUS_SERVER }}
           api_key: ${{ env.OCTOPUS_API_KEY }}
-          package_id: ${{ steps.load-payload.outputs.package_id }}
-          package_version: ${{ steps.load-payload.outputs.payload_version }}
+          package_id: ${{ env.PACKAGE_ID }}
+          package_version: ${{ env.PAYLOAD_VERSION }}
           source_path: ${{ env.GITHUB_WORKSPACE }}
           output_folder: ${{ env.GITHUB_WORKSPACE }}/artifacts
 
@@ -121,7 +71,7 @@ jobs:
           server: ${{ env.OCTOPUS_SERVER }}
           api_key: ${{ env.OCTOPUS_API_KEY }}
           project: ${{ vars.OCTOPUS_PROJECT_SLUG }}
-          version: ${{ steps.load-payload.outputs.payload_version }}
+          version: ${{ env.PAYLOAD_VERSION }}
 
       - name: Create a release in Octopus Deploy
         id: create-release
@@ -133,7 +83,7 @@ jobs:
           server: ${{ env.OCTOPUS_SERVER }}
           api_key: ${{ env.OCTOPUS_API_KEY }}
           project: ${{ vars.OCTOPUS_PROJECT_SLUG }}
-          release_number: ${{ steps.load-payload.outputs.payload_version }}
+          release_number: ${{ env.PAYLOAD_VERSION }}
 
       - name: Deploy release to Development
         id: deploy-release-to-development
@@ -145,5 +95,5 @@ jobs:
           server: ${{ env.OCTOPUS_SERVER }}
           api_key: ${{ env.OCTOPUS_API_KEY }}
           project: ${{ vars.OCTOPUS_PROJECT_SLUG }}
-          release_number: ${{ steps.load-payload.outputs.payload_version }}
+          release_number: ${{ env.PAYLOAD_VERSION }}
           environments: "Development"

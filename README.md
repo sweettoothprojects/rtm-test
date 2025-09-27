@@ -31,7 +31,7 @@ Health check
 CI and image publishing
 
 - This repository contains two GitHub Actions workflows:
-	- `.github/workflows/ci.yml` — builds the project, constructs an OCI image (paketo buildpacks), tags the image with multiple tags (project version, incremented append version, and commit SHA) and pushes to Amazon ECR. It also optionally tags `latest` for `main`.
+		- `.github/workflows/ci.yml` — builds the project, constructs an OCI image (paketo buildpacks), tags the image with multiple tags (project version and commit SHA) and pushes to Amazon ECR. It also optionally tags `latest` for `main`.
 	- `.github/workflows/octopus-deploy.yml` — validates the pushed image, resolves the Octopus project by slug (if necessary), and creates an Octopus release via the Octopus API.
 
 Required repository secrets and variables (set in GitHub Settings)
@@ -56,7 +56,7 @@ How CI tags are produced
 
 - The CI job tags the same image with these tags (by design):
 	- Maven `project.version` (e.g. `0.0.1-SNAPSHOT` or `0.0.2`)
-	- `appendVersion` — incremented patch/last segment derived from the semver
+		- `appendVersion` — (removed) previously used to generate an incremented patch tag; workflows now use project version and commit SHA only
 	- commit SHA (immutable, exact reference)
 	- `latest` (only pushed when building on `main`)
 
@@ -81,5 +81,3 @@ Octopus notes
 
 - The Octopus workflow creates a release by POSTing to `/api/releases`. The workflow injects release variables: `ImageTag`, `ImageName`, `Registry`, `ImageDigest`, `Commit`, `Branch`, and `BuildUrl`.
 - The workflow resolves the Octopus project id from `OCTOPUS_PROJECT_SLUG` if `OCTOPUS_PROJECT_ID` secret is not provided.
-
-If you'd like me to add more docs (e.g., sample IAM trust policy for the role, or example Octopus step configuration that consumes the injected variables), tell me which one and I will add it.
