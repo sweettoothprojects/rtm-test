@@ -71,6 +71,7 @@ jobs:
         env:
           OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
           OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+          OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
         with:
           server: ${{ env.OCTOPUS_SERVER }}
           api_key: ${{ env.OCTOPUS_API_KEY }}
