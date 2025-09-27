@@ -50,7 +50,7 @@ jobs:
       - name: Build module image
         run: |
           # Determine the module to build from the project's artifactId
-          ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
+          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
           ./mvnw -B package -pl "${ARTIFACT_ID}" spring-boot:build-image -DskipTests -DskipIt
 
       - name: Resolve project version
@@ -140,7 +140,7 @@ jobs:
           APPEND=${{ steps.append_version.outputs.appendVersion }}
 
           # Determine local image name from Maven (artifactId:projectVersion)
-          ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
+          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
           LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
 
           # Target name = ECR repository (no separate IMAGE_NAME)
@@ -162,7 +162,7 @@ jobs:
           REGISTRY=${{ steps.login-ecr.outputs.registry }}
           REPO=${ECR_REPOSITORY}
           # compute image name from Maven
-          ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec || true)
+          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout || true)
           if [ -z "${ARTIFACT_ID:-}" ]; then
             echo "ERROR: Could not determine artifactId from Maven. Ensure mvnw is present and pom.xml defines artifactId."
             exit 1
