@@ -31,7 +31,7 @@ jobs:
 
       - name: Download multiple artifacts from triggering CI run
         if: github.event_name == 'workflow_run'
-        uses: marcofaggian/action-download-multiple-artifacts@v1
+        uses: marcofaggian/action-download-multiple-artifacts@v4.0.1
         with:
           names: octopus-payload
           paths: octopus-payload
@@ -41,12 +41,12 @@ jobs:
 
       - name: Read octopus payload file
         id: read-payload
-        uses: andstor/file-reader-action@v1
+        uses: guibranco/github-file-reader-action-v2@v2.2.854
         with:
           path: ${{ github.workspace }}/octopus-payload/octopus_payload.json
 
       - name: File contents
-        run: echo "${ steps.read-payload.outputs.contents }"
+        run: echo "${{ steps.read-payload.outputs.contents }}"
 
       - name: Package
         uses: OctopusDeploy/create-zip-package-action@v3
