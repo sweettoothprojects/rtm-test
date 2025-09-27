@@ -1,17 +1,7 @@
-name: CI
+name: RTM Sample App CI
 
 # CI workflow: builds with Maven + Paketo buildpacks, uses GitHub OIDC to assume role,
 # caches Maven, computes semantic version tags and pushes to Amazon ECR.
-
-# Recommended action tags (use the latest stable major; pin to a full commit SHA for production):
-# - actions/checkout: v4
-# - actions/setup-java: v4
-# - actions/cache: v4
-# - aws-actions/configure-aws-credentials: v2 (recommended: pin to SHA)
-# - aws-actions/amazon-ecr-login: v1 (recommended: pin to SHA)
-#
-# To pin to a SHA: fetch the commit SHA from the action repo's commits page and replace the tag,
-# e.g. uses: actions/checkout@<sha>
 
 permissions:
   id-token: write
@@ -22,24 +12,19 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  # Configuration is read from repository variables and secrets instead of workflow_call inputs.
-  # Recommended repository variables / secrets to set:
-  # - REPO_DOCKER_IMAGE (repo variable, optional)
-  # - REPO_IMAGE_NAME  (repo variable, optional)
-  # - ECR_REPOSITORY   (secret)
-  # - AWS_REGION       (secret)
-  # - AWS_ROLE_TO_ASSUME (secret)
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       # Prefer repository secrets; set these in GitHub: Settings > Secrets
-      DOCKER_IMAGE: ${{ secrets.REPO_DOCKER_IMAGE }}
+  # DOCKER_IMAGE is unused; remove to avoid confusion
       ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
       ECR_ACCOUNT_ID: ${{ secrets.ECR_ACCOUNT_ID }}
+      # Allow CI to include the Octopus project slug in the payload (optional repo var)
+      OCTOPUS_PROJECT_SLUG: ${{ vars.OCTOPUS_PROJECT_SLUG }}
 
     steps:
       - uses: actions/checkout@v4
@@ -58,18 +43,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-maven-
 
-      - name: Build with Maven
+      - name: Maven clean install (bootstrap modules)
         run: |
-          ./mvnw -B -DskipTests verify
+          ./mvnw -B clean install -DskipTests -DskipIt -U
 
-      - name: Build image with Buildpacks (paketo)
+      - name: Build module image
         run: |
-          ./mvnw -B -DskipTests spring-boot:build-image
+          # Determine the module to build from the project's artifactId
+          ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
+          ./mvnw -B package -pl "${ARTIFACT_ID}" spring-boot:build-image -DskipTests -DskipIt
 
       - name: Resolve project version
         id: version
         run: |
-          projectVersion=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
+          # Use Maven help:evaluate to reliably read project.version
+          projectVersion=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)
           echo "projectVersion=$projectVersion" >> $GITHUB_OUTPUT
           if [[ "$projectVersion" == *"SNAPSHOT" ]]; then
             semver=${projectVersion//-SNAPSHOT/-dev}
@@ -77,14 +65,46 @@ jobs:
             semver=$projectVersion
           fi
           echo "semver=$semver" >> $GITHUB_OUTPUT
-          echo "SEMVER=$semver" >> $GITHUB_ENV
+          echo "SEMVER_VERSION=$semver" >> $GITHUB_ENV
 
       - name: Compute appendVersion
         id: append_version
         run: |
-          appendVersion=$(echo $SEMVER | awk -F. -v OFS=. '{$NF += 1 ; print}')
+          appendVersion=$(echo $SEMVER_VERSION | awk -F. -v OFS=. '{$NF += 1 ; print}')
           echo "appendVersion=$appendVersion" >> $GITHUB_OUTPUT
           echo "APPEND_VERSION=$appendVersion" >> $GITHUB_ENV
+
+      - name: Build Octopus payload
+        run: |
+          set -euo pipefail
+          # Extract Maven coordinates for payload
+          ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout || true)
+          PROJECT_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout || true)
+          GROUP_ID=$(./mvnw help:evaluate -Dexpression=project.groupId -q -DforceStdout || true)
+          REGISTRY="${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          REPO="${ECR_REPOSITORY}"
+          BRANCH_NAME=$(echo "${GITHUB_REF}" | sed -e 's@^refs/heads/@@') || true
+
+          printf '%s' "{\"ProjectId\":\"${OCTOPUS_PROJECT_SLUG:-}\",\"Version\":\"${PROJECT_VERSION}\",\"SelectedPackages\":[],\"ReleaseNotes\":\"Created from CI\",\"Variables\":{\"ImageTag\":\"${PROJECT_VERSION}\",\"ImageName\":\"${REPO}\",\"Registry\":\"${REGISTRY}\",\"Commit\":\"${GITHUB_SHA}\",\"Branch\":\"${BRANCH_NAME}\",\"BuildUrl\":\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\",\"ProjectVersion\":\"${PROJECT_VERSION}\"},\"package_id\":\"${GROUP_ID}\"}" > octopus_payload.json
+
+      - name: Upload Octopus payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: octopus-payload
+          path: octopus_payload.json
+
+      - name: Create and upload build-info
+        run: |
+          set -euo pipefail
+          # create a small JSON with the tags we pushed
+          PROJECT_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout || true)
+          echo "{\"projectVersion\":\"${PROJECT_VERSION}\",\"appendVersion\":\"${APPEND_VERSION:-}\",\"sha\":\"${GITHUB_SHA}\"}" > build-info.json
+        # upload build info for downstream workflows
+      - name: Upload build-info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: build-info.json
 
       - name: Resolve role ARN (expects AWS_ROLE_TO_ASSUME env to be a full ARN)
         id: resolve-role
@@ -96,7 +116,7 @@ jobs:
           echo "ROLE_ARN=${AWS_ROLE_TO_ASSUME}" >> $GITHUB_OUTPUT
 
       - name: Configure AWS credentials (assume role via OIDC)
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ steps.resolve-role.outputs.ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -119,16 +139,9 @@ jobs:
           PROJECT_VERSION=${{ steps.version.outputs.projectVersion }}
           APPEND=${{ steps.append_version.outputs.appendVersion }}
 
-          # Determine local image name (prefer DOCKER_IMAGE repo variable). If not provided,
-          # use the build name: artifactId:projectVersion (derived from Maven).
-          LOCAL_IMAGE="${DOCKER_IMAGE:-}"
-          if [ -z "$LOCAL_IMAGE" ]; then
-            ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
-            # fallback to 'demo' if artifact lookup fails
-            ARTIFACT_ID=${ARTIFACT_ID:-demo}
-            LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
-            echo "No DOCKER_IMAGE provided; using computed local image: $LOCAL_IMAGE"
-          fi
+          # Determine local image name from Maven (artifactId:projectVersion)
+          ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec)
+          LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
 
           # Target name = ECR repository (no separate IMAGE_NAME)
           TARGET_NAME="$REPO"
@@ -148,14 +161,14 @@ jobs:
           set -euo pipefail
           REGISTRY=${{ steps.login-ecr.outputs.registry }}
           REPO=${ECR_REPOSITORY}
-          LOCAL_IMAGE="${DOCKER_IMAGE:-}"
-          if [ -z "$LOCAL_IMAGE" ]; then
-            # compute image name if not supplied
-            ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec || true)
-            ARTIFACT_ID=${ARTIFACT_ID:-demo}
-            PROJECT_VERSION=${{ steps.version.outputs.projectVersion }}
-            LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
+          # compute image name from Maven
+          ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec || true)
+          if [ -z "${ARTIFACT_ID:-}" ]; then
+            echo "ERROR: Could not determine artifactId from Maven. Ensure mvnw is present and pom.xml defines artifactId."
+            exit 1
           fi
+          PROJECT_VERSION=${{ steps.version.outputs.projectVersion }}
+          LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
           docker tag "$LOCAL_IMAGE" "$REGISTRY/$REPO:latest"
           docker push "$REGISTRY/$REPO:latest"
         # Use job-level env for ECR_REPOSITORY

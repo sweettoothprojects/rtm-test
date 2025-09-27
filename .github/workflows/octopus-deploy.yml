@@ -8,7 +8,7 @@ on:
   workflow_dispatch: {}
   # Run automatically after the CI workflow completes successfully on the main branch
   workflow_run:
-    workflows: ["CI"]
+    workflows: ["RTM Sample App CI"]
     types:
       - completed
 
@@ -20,13 +20,14 @@ jobs:
     if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
     env:
       # Prefer repository secrets. Set these in GitHub: Settings > Secrets
-      DOCKER_IMAGE: ${{ secrets.REPO_DOCKER_IMAGE }}
       IMAGE_TAG_INPUT: ${{ secrets.REPO_IMAGE_TAG }}
       ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
       AWS_REGION: ${{ secrets.AWS_REGION }}
       ECR_ACCOUNT_ID: ${{ secrets.ECR_ACCOUNT_ID }}
       # Octopus project slug configurable via repo variable (set in Settings > Variables)
       OCTOPUS_PROJECT_SLUG: ${{ vars.OCTOPUS_PROJECT_SLUG }}
+      # Control whether the workflow will pack & push a package to Octopus (set to 'true' to enable)
+      OCTOPUS_PUSH_PACKAGE: ${{ vars.OCTOPUS_PUSH_PACKAGE }}
       # Expose GitHub context into env variables for shell steps
       GITHUB_SHA: ${{ github.sha }}
       GITHUB_REF: ${{ github.ref }}
@@ -36,150 +37,107 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set provenance environment
-        run: |
-          # Use job-level env values (safer for YAML parsing)
-          echo "COMMIT=${GITHUB_SHA}" >> $GITHUB_ENV
-          # derive branch name from GITHUB_REF
-          BRANCH_NAME=$(echo "${GITHUB_REF}" | sed -e 's@^refs/heads/@@') || true
-          echo "BRANCH=${BRANCH_NAME}" >> $GITHUB_ENV
-          echo "BUILD_URL=${{ github.server_url }}/${{ github.repository }}/actions/runs/${GITHUB_RUN_ID}" >> $GITHUB_ENV
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+      - name: Download Octopus payload from CI
+        uses: actions/download-artifact@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          name: octopus-payload
+          path: ${{ github.workspace }}
 
-      - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Validate image (local or ECR)
-        id: validate-pull
+      - name: Load payload metadata
+        id: load-payload
         run: |
           set -euo pipefail
-
-          # Resolve values in shell
-          LOCAL_IMAGE="${DOCKER_IMAGE:-}"
-          TARGET_NAME="${ECR_REPOSITORY}"
-          IMAGE_TAG_VAL="${IMAGE_TAG_INPUT:-${COMMIT:-}}"
-
-          REGISTRY="${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
-          if [ -n "$LOCAL_IMAGE" ]; then
-            echo "Attempting to pull local image name: $LOCAL_IMAGE"
-            if docker pull "$LOCAL_IMAGE"; then
-              echo "pulled_local=true" >> $GITHUB_OUTPUT
-              echo "Pulled $LOCAL_IMAGE successfully"
-              exit 0
-            else
-              echo "Local image pull failed, will try ECR image"
-            fi
-          fi
-
-          FULL_IMAGE="$REGISTRY/$TARGET_NAME:$IMAGE_TAG_VAL"
-          echo "Attempting to pull ECR image $FULL_IMAGE"
-          docker pull "$FULL_IMAGE"
-          echo "pulled_local=false" >> $GITHUB_OUTPUT
-
-      - name: Get image digest
-        id: get-digest
-        run: |
-          set -euo pipefail
-          IMAGE_TAG_VAL="${IMAGE_TAG_INPUT:-${COMMIT:-}}"
-          REPO_NAME="${ECR_REPOSITORY}"
-          DIGEST=""
-          if ! command -v aws >/dev/null 2>&1; then
-            echo "aws CLI not found on runner"
-            echo "image_digest=" >> $GITHUB_OUTPUT
-            echo "IMAGE_DIGEST=" >> $GITHUB_ENV
-            exit 0
-          fi
-
-          echo "IMAGE_TAG_VAL=${IMAGE_TAG_VAL}"
-          echo "REPO_NAME=${REPO_NAME}"
-          # show which identity is being used (non-secret)
-          aws sts get-caller-identity || true
-
-          # Prefer describe-images for robust digest lookup and better diagnostics
-          RAW=$(aws ecr describe-images --repository-name "$REPO_NAME" --image-ids imageTag="$IMAGE_TAG_VAL" --region "${AWS_REGION:-}" --output json 2>&1 || true)
-          echo "raw describe-images output:"
-          echo "$RAW"
-
-          DIGEST=$(echo "$RAW" | jq -r '.imageDetails[0].imageDigest // empty' || true)
-          echo "extracted digest: ${DIGEST}"
-
-          # expose as step output and persist into job env for later steps
-          echo "image_digest=${DIGEST}" >> $GITHUB_OUTPUT
-          echo "IMAGE_DIGEST=${DIGEST}" >> $GITHUB_ENV
-
-
-
-      - name: Resolve Octopus ProjectId by slug
-        id: resolve-project
-        env:
-          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
-          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
-        run: |
-          set -euo pipefail
-          # Use repository variable if set, otherwise fall back to rtm-test
-          SLUG="${OCTOPUS_PROJECT_SLUG:-rtm-test}"
-          PROJECT_ID=""
-          if [ -n "${OCTOPUS_API_KEY:-}" ] && [ -n "${OCTOPUS_SERVER:-}" ]; then
-            # Query projects and filter by slug. The API returns an array of projects.
-            PROJECT_ID=$(curl -sS -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" "${OCTOPUS_SERVER}/api/projects/all" | jq -r --arg slug "$SLUG" '.[] | select(.Slug==$slug) | .Id' || true)
-          fi
-          PROJECT_ID=${PROJECT_ID:-}
-          echo "project_id=$PROJECT_ID" >> $GITHUB_OUTPUT
-
-      - name: Build Octopus release payload
-        id: build-payload
-        env:
-          OCTOPUS_PROJECT_ID: ${{ secrets.OCTOPUS_PROJECT_ID }}
-          RESOLVED_PROJECT_ID: ${{ steps.resolve-project.outputs.project_id }}
-        run: |
-          set -euo pipefail
-          # If DOCKER_IMAGE not provided, try to compute the local image name from Maven (artifactId:version)
-          if [ -z "${DOCKER_IMAGE:-}" ]; then
-            ARTIFACT_ID=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.artifactId}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec || true)
-            PROJECT_VERSION=$(./mvnw -q -Dexec.executable=echo -Dexec.args='${project.version}' --non-recursive org.codehaus.mojo:exec-maven-plugin:3.1.0:exec || true)
-            ARTIFACT_ID=${ARTIFACT_ID:-demo}
-            PROJECT_VERSION=${PROJECT_VERSION:-${COMMIT}}
-            LOCAL_IMAGE="${ARTIFACT_ID}:${PROJECT_VERSION}"
-          fi
-
-          IMAGE_TAG_VAL="${IMAGE_TAG_INPUT:-${COMMIT:-}}"
-          REGISTRY="${ECR_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          IMAGE_DIGEST="${{ steps.get-digest.outputs.image_digest }}"
-          COMMIT_ID="${COMMIT}"
-          BRANCH_NAME="${BRANCH}"
-          BUILD_URL_VAL="${BUILD_URL}"
-
-          # Build JSON safely via printf to avoid YAML parsing issues
-          # Prefer explicit OCTOPUS_PROJECT_ID secret; fall back to resolved project id by slug
-          PROJECT_ID_TO_USE="${OCTOPUS_PROJECT_ID:-}${RESOLVED_PROJECT_ID:-}"
-          # If both are set, prefer the explicit secret
-          if [ -n "${OCTOPUS_PROJECT_ID:-}" ]; then
-            PROJECT_ID_TO_USE="${OCTOPUS_PROJECT_ID}"
-          fi
-
-          printf '{"ProjectId":"%s","Version":"%s","SelectedPackages":[],"ReleaseNotes":"Created from CI (image pull validated)","Variables":{"ImageTag":"%s","ImageName":"%s","Registry":"%s","ImageDigest":"%s","Commit":"%s","Branch":"%s","BuildUrl":"%s"}}' "${PROJECT_ID_TO_USE}" "${IMAGE_TAG_VAL}" "${IMAGE_TAG_VAL}" "${ECR_REPOSITORY}" "${REGISTRY}" "${IMAGE_DIGEST}" "${COMMIT_ID}" "${BRANCH_NAME}" "${BUILD_URL_VAL}" > octopus_payload.json
-
-          echo "payload_file=octopus_payload.json" >> $GITHUB_OUTPUT
-
-      - name: Post Octopus release
-        env:
-          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
-          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
-          PAYLOAD_FILE: ${{ steps.build-payload.outputs.payload_file }}
-        run: |
-          set -euo pipefail
-          if [ ! -f "${PAYLOAD_FILE}" ]; then
-            echo "Payload file not found: ${PAYLOAD_FILE}"
+          if [ ! -f "$GITHUB_WORKSPACE/octopus_payload.json" ]; then
+            echo "ERROR: expected octopus_payload.json artifact to be present (uploaded by CI)." >&2
             exit 1
           fi
+          # Read JSON fields using a tiny jq invocation if available, otherwise use grep/awk
+          if command -v jq >/dev/null 2>&1; then
+            PACKAGE_ID=$(jq -r '.package_id // empty' "$GITHUB_WORKSPACE/octopus_payload.json")
+            VERSION=$(jq -r '.Version // empty' "$GITHUB_WORKSPACE/octopus_payload.json")
+          else
+            PACKAGE_ID=$(grep -o '"package_id"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/octopus_payload.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
+            VERSION=$(grep -o '"Version"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/octopus_payload.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
+          fi
+          echo "package_id=${PACKAGE_ID}" >> $GITHUB_OUTPUT
+          echo "payload_version=${VERSION}" >> $GITHUB_OUTPUT
 
-          curl -sS -X POST "${OCTOPUS_SERVER}/api/releases" \
-            -H "X-Octopus-ApiKey: ${OCTOPUS_API_KEY}" \
-            -H "Content-Type: application/json" \
-            --data-binary @"${PAYLOAD_FILE}"
+      - name: Download build-info from CI
+        uses: actions/download-artifact@v4
+        with:
+          name: build-info
+          path: ${{ github.workspace }}
+
+      - name: Load build-info
+        id: load-build-info
+        run: |
+          set -euo pipefail
+          if [ ! -f "$GITHUB_WORKSPACE/build-info.json" ]; then
+            echo "ERROR: expected build-info.json artifact to be present (uploaded by CI)." >&2
+            exit 1
+          fi
+          if command -v jq >/dev/null 2>&1; then
+            PROJECT_VERSION=$(jq -r '.projectVersion // empty' "$GITHUB_WORKSPACE/build-info.json")
+            APPEND_VERSION=$(jq -r '.appendVersion // empty' "$GITHUB_WORKSPACE/build-info.json")
+            SHA=$(jq -r '.sha // empty' "$GITHUB_WORKSPACE/build-info.json")
+          else
+            PROJECT_VERSION=$(grep -o '"projectVersion"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/build-info.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
+            APPEND_VERSION=$(grep -o '"appendVersion"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/build-info.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
+            SHA=$(grep -o '"sha"[[:space:]]*:[[:space:]]*"[^"]\+"' "$GITHUB_WORKSPACE/build-info.json" | sed -E 's/.*:"([^"]+)"/\1/') || true
+          fi
+          echo "PROJECT_VERSION=${PROJECT_VERSION}" >> $GITHUB_ENV
+          echo "APPEND_VERSION=${APPEND_VERSION}" >> $GITHUB_ENV
+          echo "IMAGE_SHA=${SHA}" >> $GITHUB_ENV
+          echo "build_project_version=${PROJECT_VERSION}" >> $GITHUB_OUTPUT
+          echo "build_append_version=${APPEND_VERSION}" >> $GITHUB_OUTPUT
+          echo "build_sha=${SHA}" >> $GITHUB_OUTPUT
+
+      - name: Package
+        uses: OctopusDeploy/create-zip-package-action@v3
+        env:
+          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        with:
+          server: ${{ env.OCTOPUS_SERVER }}
+          api_key: ${{ env.OCTOPUS_API_KEY }}
+          package_id: ${{ steps.load-payload.outputs.package_id }}
+          package_version: ${{ steps.load-payload.outputs.payload_version }}
+          source_path: ${{ env.GITHUB_WORKSPACE }}
+          output_folder: ${{ env.GITHUB_WORKSPACE }}/artifacts
+
+      - name: Push Build Information
+        uses: OctopusDeploy/push-build-information-action@v3
+        env:
+          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+        with:
+          server: ${{ env.OCTOPUS_SERVER }}
+          api_key: ${{ env.OCTOPUS_API_KEY }}
+          project: ${{ vars.OCTOPUS_PROJECT_SLUG }}
+          version: ${{ steps.load-payload.outputs.payload_version }}
+
+      - name: Create a release in Octopus Deploy
+        id: create-release
+        uses: OctopusDeploy/create-release-action@v3
+        env:
+          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+        with:
+          server: ${{ env.OCTOPUS_SERVER }}
+          api_key: ${{ env.OCTOPUS_API_KEY }}
+          project: ${{ vars.OCTOPUS_PROJECT_SLUG }}
+          release_number: ${{ steps.load-payload.outputs.payload_version }}
+
+      - name: Deploy release to Development
+        id: deploy-release-to-development
+        uses: OctopusDeploy/deploy-release-action@v3
+        env:
+          OCTOPUS_SERVER: ${{ secrets.OCTOPUS_SERVER }}
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+        with:
+          server: ${{ env.OCTOPUS_SERVER }}
+          api_key: ${{ env.OCTOPUS_API_KEY }}
+          project: ${{ vars.OCTOPUS_PROJECT_SLUG }}
+          release_number: ${{ steps.load-payload.outputs.payload_version }}
+          environments: "Development"
