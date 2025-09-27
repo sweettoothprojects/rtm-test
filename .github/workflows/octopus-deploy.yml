@@ -37,11 +37,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Octopus payload from CI
+      - name: Download Octopus payload from triggering CI run
+        if: github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
           name: octopus-payload
+          run-id: ${{ github.event.workflow_run.id }}
           path: ${{ github.workspace }}
+
 
       - name: Load payload metadata
         id: load-payload
@@ -62,11 +65,14 @@ jobs:
           echo "package_id=${PACKAGE_ID}" >> $GITHUB_OUTPUT
           echo "payload_version=${VERSION}" >> $GITHUB_OUTPUT
 
-      - name: Download build-info from CI
+      - name: Download build-info from triggering CI run
+        if: github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
           name: build-info
+          run-id: ${{ github.event.workflow_run.id }}
           path: ${{ github.workspace }}
+
 
       - name: Load build-info
         id: load-build-info
