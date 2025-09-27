@@ -29,14 +29,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download multiple artifacts from triggering CI run
+      - name: Download artifact from triggering CI run
         if: github.event_name == 'workflow_run'
-        uses: marcofaggian/action-download-multiple-artifacts@v4.0.1
+        uses: actions/download-artifact@v5
         with:
-          names: octopus-payload
-          paths: octopus-payload
-          workflow: ci.yml
-          repo: ${{ github.repository }}
+          name: octopus-payload
+          # Run id of the triggering workflow_run event
+          run-id: ${{ github.event.workflow_run.id }}
+          path: octopus-payload
+          repository: ${{ github.repository }}
+          github-token: ${{ secrets.RTM_TEST }}
 
       - name: Read octopus payload file
         id: read-payload
