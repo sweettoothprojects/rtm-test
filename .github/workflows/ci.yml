@@ -51,7 +51,8 @@ jobs:
         run: |
           # Determine the module to build from the project's artifactId
           ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout)
-          ./mvnw -B package -pl "${ARTIFACT_ID}" spring-boot:build-image -DskipTests -DskipIt
+          # Build the module by artifactId (use :artifactId form) and also build required modules (-am)
+          ./mvnw -B package -pl ":${ARTIFACT_ID}" -am spring-boot:build-image -DskipTests -DskipIt
 
       - name: Resolve project version
         id: version
