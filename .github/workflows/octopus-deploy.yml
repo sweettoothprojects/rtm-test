@@ -107,12 +107,12 @@ jobs:
 
       - name: Create a release in Octopus Deploy
         id: create-release
-        uses: OctopusDeploy/create-release-action@v3
+        uses: OctopusDeploy/create-release-action@v3.3.0
         env:
           OCTOPUS_URL: ${{ secrets.OCTOPUS_SERVER }}
-          OCTOPUS_CLI_SERVER: ${{ secrets.OCTOPUS_SERVER }}
           OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
           OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
         with:
           project: ${{ secrets.OCTOPUS_PROJECT_SLUG }}
-          release_number: ${{ steps.get-version.outputs.payload_version }}
+          packages: |
+            ${{ steps.get-artifact-id.outputs.package_id }}:${{ steps.get-version.outputs.payload_version }}
