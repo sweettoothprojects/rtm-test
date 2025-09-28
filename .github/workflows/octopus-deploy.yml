@@ -82,7 +82,7 @@ jobs:
 
       - name: Create a release in Octopus Deploy
         id: create-release
-        uses: OctopusDeploy/create-release-action@v2
+        uses: OctopusDeploy/create-release-action@v3
         env:
           OCTOPUS_URL: ${{ secrets.OCTOPUS_SERVER }}
           OCTOPUS_CLI_SERVER: ${{ secrets.OCTOPUS_SERVER }}
@@ -90,6 +90,7 @@ jobs:
           OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
         with:
           project: ${{ secrets.OCTOPUS_PROJECT_SLUG }}
+          release_number: ${{ env.PAYLOAD_VERSION }}
 
       - name: Deploy release to Development
         id: deploy-release-to-development
