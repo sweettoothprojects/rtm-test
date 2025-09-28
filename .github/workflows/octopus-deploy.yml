@@ -21,6 +21,10 @@ jobs:
     env:
       # Octopus project slug configurable via repo variable (set in Settings > Variables)
       OCTOPUS_PROJECT_SLUG: ${{ secrets.OCTOPUS_PROJECT_SLUG }}
+    outputs:
+      version: ${{ steps.get-version.outputs.payload_version }}
+      package_id: ${{ steps.get-artifact-id.outputs.package_id }}
+      group_id: ${{ steps.get-group-id.outputs.group_id }}
 
     steps:
       - name: Checkout
@@ -43,22 +47,33 @@ jobs:
         with:
           path: ${{ github.workspace }}/octopus-payload/octopus_payload.json
 
-      - name: File contents
-        run: echo "${{ steps.read-payload.outputs.contents }}"
+      - name: Get project version
+        id: get-version
+        run: |
+          set -euo pipefail
+          VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout || true)
+          echo "payload_version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Extract Maven coordinates
+      - name: Get artifact id
+        id: get-artifact-id
         run: |
           set -euo pipefail
           ARTIFACT_ID=$(./mvnw help:evaluate -Dexpression=project.artifactId -q -DforceStdout || true)
-          PROJECT_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout || true)
-          echo "PACKAGE_ID=$ARTIFACT_ID" >> $GITHUB_ENV
-          echo "PAYLOAD_VERSION=$PROJECT_VERSION" >> $GITHUB_ENV
+          echo "package_id=$ARTIFACT_ID" >> $GITHUB_OUTPUT
+
+      - name: Get group id
+        id: get-group-id
+        run: |
+          set -euo pipefail
+          GROUP_ID=$(./mvnw help:evaluate -Dexpression=project.groupId -q -DforceStdout || true)
+          echo "group_id=$GROUP_ID" >> $GITHUB_OUTPUT
+    
 
       - name: Create a Zip package
         uses: OctopusDeploy/create-zip-package-action@v3
         with:
-          package_id: ${{ env.PACKAGE_ID }}
-          version: ${{ env.PAYLOAD_VERSION }}
+          package_id: ${{ steps.get-artifact-id.outputs.package_id }}
+          version: ${{ steps.get-version.outputs.payload_version }}
           output_folder: ${{ github.workspace }}/artifacts
           base_path: ${{ github.workspace }}/octopus-payload
           files: '**/*'
@@ -76,9 +91,9 @@ jobs:
           OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
         with:
           packages: |
-            ${{ env.PACKAGE_ID }}
-          version: ${{ env.PAYLOAD_VERSION }}
-          overwrite_mode: IgnoreIfExists
+            artifacts/${{ steps.get-artifact-id.outputs.package_id }}.${{ steps.get-version.outputs.payload_version }}.zip
+          version: ${{ steps.get-version.outputs.payload_version }}
+          overwrite_mode: OverwriteExisting
 
       - name: Create a release in Octopus Deploy
         id: create-release
@@ -90,17 +105,4 @@ jobs:
           OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
         with:
           project: ${{ secrets.OCTOPUS_PROJECT_SLUG }}
-          release_number: ${{ env.PAYLOAD_VERSION }}
-
-      - name: Deploy release to Development
-        id: deploy-release-to-development
-        uses: OctopusDeploy/deploy-release-action@v3
-        env:
-          OCTOPUS_URL: ${{ secrets.OCTOPUS_SERVER }}
-          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
-        with:
-          server: ${{ env.OCTOPUS_URL }}
-          api_key: ${{ env.OCTOPUS_API_KEY }}
-          project: ${{ secrets.OCTOPUS_PROJECT_SLUG }}
-          release_number: ${{ env.PAYLOAD_VERSION }}
-          environments: "Development"
+          release_number: ${{ steps.get-version.outputs.payload_version }}
