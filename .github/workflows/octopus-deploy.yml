@@ -73,7 +73,7 @@ jobs:
           packages: |
             ${{ env.PACKAGE_ID }}
           version: ${{ env.PAYLOAD_VERSION }}
-          overwrite_mode: OverwriteIfExists
+          overwrite_mode: IgnoreIfExists
 
       - name: Create a release in Octopus Deploy
         id: create-release
