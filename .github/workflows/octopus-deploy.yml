@@ -76,7 +76,7 @@ jobs:
 
       - name: Create a release in Octopus Deploy
         id: create-release
-        uses: OctopusDeploy/create-release-action@v3
+        uses: OctopusDeploy/create-release-action@v2
         env:
           OCTOPUS_URL: ${{ secrets.OCTOPUS_SERVER }}
           OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
