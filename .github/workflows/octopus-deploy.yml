@@ -83,6 +83,16 @@ jobs:
         with:
           version: 'latest'
 
+      - name: Publish Artifacts to Octopus
+        uses: OctopusDeploy/push-package-action@v3
+        env:
+          OCTOPUS_URL: ${{ secrets.OCTOPUS_SERVER }}
+          OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
+          OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
+        with: 
+          packages: |
+            ${{ github.workspace }}/artifacts/${{ steps.get-artifact-id.outputs.package_id }}.${{ steps.get-version.outputs.payload_version }}.zip
+            
       - name: Push Build Information
         uses: OctopusDeploy/push-build-information-action@v3
         env:
@@ -91,7 +101,7 @@ jobs:
           OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
         with:
           packages: |
-            artifacts/${{ steps.get-artifact-id.outputs.package_id }}.${{ steps.get-version.outputs.payload_version }}.zip
+            ${{ steps.get-artifact-id.outputs.package_id }}
           version: ${{ steps.get-version.outputs.payload_version }}
           overwrite_mode: OverwriteExisting
 
