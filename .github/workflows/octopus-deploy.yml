@@ -92,7 +92,8 @@ jobs:
         with: 
           packages: |
             ${{ github.workspace }}/artifacts/${{ steps.get-artifact-id.outputs.package_id }}.${{ steps.get-version.outputs.payload_version }}.zip
-            
+          overwrite_mode: OverwriteExisting
+          
       - name: Push Build Information
         uses: OctopusDeploy/push-build-information-action@v3
         env:
