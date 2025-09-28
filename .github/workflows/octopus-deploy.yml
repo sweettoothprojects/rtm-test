@@ -85,6 +85,7 @@ jobs:
         uses: OctopusDeploy/create-release-action@v2
         env:
           OCTOPUS_URL: ${{ secrets.OCTOPUS_SERVER }}
+          OCTOPUS_CLI_SERVER: ${{ secrets.OCTOPUS_SERVER }}
           OCTOPUS_API_KEY: ${{ secrets.OCTOPUS_API_KEY }}
           OCTOPUS_SPACE: ${{ vars.OCTOPUS_SPACE }}
         with:
