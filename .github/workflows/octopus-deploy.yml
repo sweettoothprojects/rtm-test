@@ -63,6 +63,11 @@ jobs:
           base_path: ${{ github.workspace }}/octopus-payload
           files: '**/*'
 
+      - name: Install Octopus CLI
+        uses: OctopusDeploy/install-octopus-cli-action@v1
+        with:
+          version: 'latest'
+
       - name: Push Build Information
         uses: OctopusDeploy/push-build-information-action@v3
         env:
